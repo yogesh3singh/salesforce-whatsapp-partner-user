@@ -1,0 +1,346 @@
+<template>
+    <lightning-card>
+        <div class="chat-wrapper">
+
+            <!-- ── Loading ── -->
+            <template if:true={isLoading}>
+                <div class="state-center">
+                    <lightning-spinner alternative-text="Loading..." size="medium"></lightning-spinner>
+                    <p class="state-label">Loading chat history...</p>
+                </div>
+            </template>
+
+            <!-- ── Access Denied ── -->
+            <template if:true={accessDenied}>
+                <div class="state-center state-denied">
+                    <div class="denied-icon">🔒</div>
+                    <h3>Access Restricted</h3>
+                    <p>You do not have access to view this Lead Opportunity.</p>
+                </div>
+            </template>
+
+            <!-- ── Main Chat UI ── -->
+            <template if:true={showChat}>
+
+                <!-- ── Header ── -->
+                <div class="chat-header">
+                    <div class="header-avatar"><span>{leadInitials}</span></div>
+                    <div class="header-info">
+                        <p class="header-name">{leadInfo.name}</p>
+                        <p class="header-meta">
+                            {maskedPhone} &bull; {universityLabel} &bull; Owner: {leadInfo.ownerName}
+                            <span class="live-dot" title="Auto-refreshing"></span>
+                        </p>
+                    </div>
+                    <div class="header-actions">
+                        <lightning-button-icon
+                            icon-name="utility:refresh"
+                            alternative-text="Refresh"
+                            title="Refresh chat"
+                            onclick={handleRefresh}
+                            class="refresh-btn">
+                        </lightning-button-icon>
+                    </div>
+                </div>
+
+                <!-- ── Stats Bar ── -->
+                <div class="stats-bar">
+                    <div class="stat">
+                        <span class="stat-val">{totalMessages}</span>
+                        <span class="stat-lbl">Total</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-val stat-in">{inboundCount}</span>
+                        <span class="stat-lbl">Received</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-val stat-out">{outboundCount}</span>
+                        <span class="stat-lbl">Sent</span>
+                    </div>
+                    <div class="stat window-stat">
+                        <span class="stat-val" style="font-size:13px">{windowStatus}</span>
+                        <span class="stat-lbl">24h Window</span>
+                    </div>
+                </div>
+
+                <!-- ── Filter Row ── -->
+                <div class="filter-row">
+                    <lightning-button-group>
+                        <lightning-button label="All"      data-filter="all"      variant={allBtnVariant}      onclick={handleFilter}></lightning-button>
+                        <lightning-button label="Received" data-filter="inbound"  variant={inboundBtnVariant}  onclick={handleFilter}></lightning-button>
+                        <lightning-button label="Sent"     data-filter="outbound" variant={outboundBtnVariant} onclick={handleFilter}></lightning-button>
+                    </lightning-button-group>
+                    <lightning-input
+                        type="search"
+                        placeholder="Search messages..."
+                        value={searchTerm}
+                        onchange={handleSearch}
+                        class="search-input">
+                    </lightning-input>
+                </div>
+
+                <!-- ── Empty State ── -->
+                <template if:true={noMessages}>
+                    <div class="state-center">
+                        <div class="empty-icon">💬</div>
+                        <p class="state-label">No messages found</p>
+                        <p class="state-sub">No WhatsApp messages have been exchanged with this lead yet.</p>
+                    </div>
+                </template>
+
+                <!-- ── Message Thread ── -->
+                <template if:false={noMessages}>
+                    <div class="message-thread" lwc:ref="thread">
+                        <template for:each={groupedMessages} for:item="group">
+                            <div key={group.date} class="date-group">
+
+                                <div class="date-separator"><span>{group.date}</span></div>
+
+                                <template for:each={group.messages} for:item="msg">
+                                    <div key={msg.id} class={msg.bubbleClass}>
+
+                                        <template if:true={msg.isInbound}>
+                                            <p class="sender-name">
+                                                {msg.userName}
+                                                <template if:true={msg.providerName}>
+                                                    <span class="provider-tag"> · {msg.providerName}</span>
+                                                </template>
+                                            </p>
+                                        </template>
+
+                                        <div class={msg.innerClass}>
+
+                                            <template if:true={msg.showTemplate}>
+                                                <p class="template-tag">📋 {msg.templateName}</p>
+                                            </template>
+
+                                            <p class="msg-text">{msg.content}</p>
+
+                                            <template if:true={msg.mediaType}>
+                                                <p class="media-tag">📎 {msg.mediaType}</p>
+                                            </template>
+
+                                            <template if:true={msg.error}>
+                                                <p class="error-tag">⚠ {msg.error}</p>
+                                            </template>
+
+                                            <template if:false={msg.isInbound}>
+                                                <template if:true={msg.providerName}>
+                                                    <p class="outbound-provider">via {msg.providerName}</p>
+                                                </template>
+                                            </template>
+
+                                            <div class="msg-meta">
+                                                <span class="msg-time">{msg.formattedTime}</span>
+                                                <template if:false={msg.isInbound}>
+                                                    <span class={msg.statusClass}>{msg.statusIcon}</span>
+                                                </template>
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </template>
+
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- ════════════════════════════════════════════════════
+                     SEND PANEL
+                     ════════════════════════════════════════════════════ -->
+                <div class="send-panel">
+
+                    <!-- ── Mode Tabs ── -->
+                    <div class="send-tabs">
+                        <button
+                            class={templateTabClass}
+                            data-mode="template"
+                            onclick={handleModeSwitch}>
+                            📋 Template
+                        </button>
+                        <button
+                            class={freeformTabClass}
+                            data-mode="freeform"
+                            onclick={handleModeSwitch}
+                            disabled={freeformDisabled}>
+                            ✏️ Freeform
+                            <template if:true={isWindowActive}>
+                                <span class="window-dot"></span>
+                            </template>
+                        </button>
+                        <template if:false={isWindowActive}>
+                            <span class="window-hint">Freeform available after customer replies</span>
+                        </template>
+                    </div>
+
+                    <!-- ── TEMPLATE MODE ── -->
+                    <template if:true={isTemplateMode}>
+                        <div class="send-form">
+                            <div class="send-form-row">
+                                <!-- ADD THIS PROVIDER FIELD -->
+                                    <div class="send-field">
+                                        <label class="field-label">Provider <span class="req">*</span></label>
+                                        <div class="select-wrap">
+                                            <select class="native-select" onchange={handleProviderChange} data-id="provider">
+                                                <option value="">Select Provider</option>
+                                                <template for:each={filteredProviderOptions} for:item="p">
+                                                    <option key={p.id} value={p.id}>{p.label}</option>
+                                                </template>
+                                            </select>
+                                        </div>
+                                    </div>
+                                <div class="send-field">
+                                    <label class="field-label">Template <span class="req">*</span></label>
+                                    <div class="template-search-wrap">
+                                        <input
+                                            type="text"
+                                            class="template-search-input"
+                                            placeholder="Search templates..."
+                                            value={templateSearchTerm}
+                                            oninput={handleTemplateSearch}
+                                            onfocus={handleTemplateInputFocus}
+                                        />
+                                        <template if:true={showTemplateDropdown}>
+                                            <div class="template-dropdown">
+                                                <template if:true={isTemplatesLoading}>
+                                                    <div class="dropdown-loading">Searching...</div>
+                                                </template>
+                                                <template if:false={isTemplatesLoading}>
+                                                    <template if:true={hasTemplateResults}>
+                                                        <template for:each={templateOptions} for:item="opt">
+                                                            <div
+                                                                key={opt.id}
+                                                                class="dropdown-item"
+                                                                data-id={opt.id}
+                                                                data-label={opt.label}
+                                                                onclick={handleTemplateSelect}>
+                                                                {opt.label}
+                                                            </div>
+                                                        </template>
+                                                    </template>
+                                                    <template if:false={hasTemplateResults}>
+                                                        <div class="dropdown-empty">No templates found</div>
+                                                    </template>
+                                                </template>
+                                            </div>
+                                        </template>
+                                    </div>
+                                    <template if:true={selectedTemplateName}>
+                                        <div class="selected-chip">
+                                            <span>📋 {selectedTemplateName}</span>
+                                            <button class="chip-clear" onclick={clearTemplate}>✕</button>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                            <div class="send-actions">
+                                <template if:true={isSending}>
+                                    <div class="sending-indicator">
+                                        <lightning-spinner size="x-small" alternative-text="Sending"></lightning-spinner>
+                                        <span>Sending...</span>
+                                    </div>
+                                </template>
+                                <template if:false={isSending}>
+                                    <lightning-button
+                                        label="Send Template"
+                                        variant="brand"
+                                        icon-name="utility:send"
+                                        onclick={handleSendTemplate}
+                                        disabled={sendTemplateDisabled}>
+                                    </lightning-button>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- ── FREEFORM MODE ── -->
+                    <template if:true={isFreeformMode}>
+                        <div class="send-form">
+                            <div class="send-form-row">
+                                <div class="send-field">
+                                    <label class="field-label">Provider <span class="req">*</span></label>
+                                    <div class="select-wrap">
+                                        <select class="native-select" onchange={handleProviderChange} data-id="provider">
+                                            <option value="">Select Provider</option>
+                                            <template for:each={filteredProviderOptions} for:item="p">
+                                                <option key={p.id} value={p.id}>{p.label}</option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="send-field send-field--sm">
+                                    <label class="field-label">Media Type</label>
+                                    <div class="select-wrap">
+                                       <select class="native-select" onchange={handleMediaTypeChange} data-id="mediaType">
+                                            <option value="Text">Text</option>
+                                            <option value="Image">Image</option>
+                                            <option value="Document">Document</option>
+                                            <option value="Video">Video</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Media URL (shown when not Text) -->
+                            <template if:true={showMediaUrl}>
+                                <div class="send-form-row">
+                                    <div class="send-field">
+                                        <label class="field-label">Media URL <span class="req">*</span></label>
+                                        <input
+                                            type="url"
+                                            class="text-input"
+                                            placeholder="https://..."
+                                            value={mediaUrl}
+                                            oninput={handleMediaUrlChange}
+                                        />
+                                    </div>
+                                    <div class="send-field send-field--sm">
+                                        <label class="field-label">File Name</label>
+                                        <input
+                                            type="text"
+                                            class="text-input"
+                                            placeholder="document.pdf"
+                                            value={mediaFileName}
+                                            oninput={handleFileNameChange}
+                                        />
+                                    </div>
+                                </div>
+                            </template>
+
+                            <!-- Message body + send button row -->
+                            <div class="composer-row">
+                                <textarea
+                                    class="msg-composer"
+                                    placeholder="Type a message..."
+                                    oninput={handleFreeformInput}
+                                    onkeydown={handleComposerKeydown}
+                                    rows="2">
+                                </textarea>
+                                <template if:true={isSending}>
+                                    <div class="send-btn-wrap">
+                                        <lightning-spinner size="x-small" alternative-text="Sending"></lightning-spinner>
+                                    </div>
+                                </template>
+                                <template if:false={isSending}>
+                                    <button
+                                        class="send-icon-btn"
+                                        onclick={handleSendFreeform}
+                                        disabled={sendFreeformDisabled}
+                                        title="Send (Ctrl+Enter)">
+                                        ➤
+                                    </button>
+                                </template>
+                            </div>
+                            <p class="composer-hint">Ctrl+Enter to send</p>
+                        </div>
+                    </template>
+
+                </div>
+                <!-- END SEND PANEL -->
+
+            </template>
+
+        </div>
+    </lightning-card>
+</template>
