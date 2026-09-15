@@ -17,9 +17,6 @@ private class WACommunityControllerTest {
     private static Lead_Opportunity__c createLead(
         String name, String phone, String university
     ) {
-        try {
-            LeadOpportunityTriggerHelper.bypassTrigger = true;
-        } catch (Exception e) { }
 
         Lead_Opportunity__c lo = new Lead_Opportunity__c(
             Name                   = name,
