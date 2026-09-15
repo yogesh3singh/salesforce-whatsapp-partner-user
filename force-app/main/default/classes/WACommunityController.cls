@@ -1,423 +1,504 @@
 /**
- * @description WhatsApp controller for Partner Community users.
+ * @description Test class for WACommunityController.
  *
- * ARCHITECTURE DECISION
- * ─────────────────────
- * Partner users cannot call OneXtel.WhatsAppService from non-Aura 
- * contexts (triggers, schedulers, queueables all fail with 
- * AuraHandledException). Solution: call directly from @AuraEnabled 
- * context combined with sharing rules on OneXtel objects that give 
- * partner users read access to Provider and Template records.
- *
- * SHARING RULES REQUIRED (Setup → Sharing Settings)
- * ──────────────────────────────────────────────────
- * WhatsApp Provider → Partner Users Group → Read
- * WhatsApp Template → Partner Users Group → Read  
- * WhatsApp Report   → Partner Users Group → Read/Write
- *
- * UNIVERSITY FILTER (same logic as WhatsAppChatController)
- * ─────────────────────────────────────────────────────────
- * Post Nov 2025:
- *   NMIMS      → provider name contains 'NMIMS'
- *   Symbiosis  → provider name contains 'Symbiosis'
- *   Others     → provider NOT NMIMS AND NOT Symbiosis
- * Pre Nov 2025:
- *   Provider name contains Lead_Vendor_source1__c value
+ * COVERAGE STRATEGY
+ * ─────────────────
+ * Tests all public methods including happy paths,
+ * error paths, and edge cases.
+ * OneXtel service calls will fail gracefully in test
+ * context — we verify error handling works correctly.
  */
-public without sharing class WACommunityController {
-
-    private static final String NMIMS_KEY           = 'NMIMS';
-    private static final String SYMBIOSIS_KEY       = 'Symbiosis';
-    private static final Date   PRE_NOV_2025_CUTOFF = Date.newInstance(2025, 11, 1);
-    private static final String NO_CONTENT_LABEL    = '(No content)';
-
+@isTest
+private class WACommunityControllerTest {
+ 
     // ─────────────────────────────────────────────────────────────────────
-    // getChatHistory
+    // Test Data Helper
     // ─────────────────────────────────────────────────────────────────────
-    /**
-     * @description Retrieves WhatsApp chat history for a Lead Opportunity.
-     * @param leadOpportunityId The Id of the Lead Opportunity record.
-     * @return List of WAMessageWrapper objects.
-     */
-    @AuraEnabled(cacheable=true)
-    public static List<WAMessageWrapper> getChatHistory(Id leadOpportunityId) {
-        List<Lead_Opportunity__c> loList = [
-            SELECT Id, Name, OwnerId, Phone__c, 
-                   Lead_Vendor_source1__c, CreatedDate
-            FROM   Lead_Opportunity__c
-            WHERE  Id = :leadOpportunityId
-            LIMIT  1
-        ];
-
-        if (loList.isEmpty()) {
-            throw new AuraHandledException(
-                'Lead Opportunity not found.'
-            );
-        }
-
-        Lead_Opportunity__c leadOpp = loList[0];
-
-        if (String.isBlank(leadOpp.Phone__c)) {
-            return new List<WAMessageWrapper>();
-        }
-
-        String likePattern  = buildPhoneLikePattern(leadOpp.Phone__c);
-        UniversityContext uc = buildUniversityContext(leadOpp);
-
-        List<OneXtel__WhatsApp_DLR__c> allMessages = [
-            SELECT Id,
-                   OneXtel__Status__c,
-                   OneXtel__Type__c,
-                   OneXtel__Message_Content__c,
-                   OneXtel__From_Number__c,
-                   OneXtel__Contact_Phone__c,
-                   OneXtel__User_Name__c,
-                   OneXtel__Provider__r.Name,
-                   OneXtel__Template__r.Name,
-                   OneXtel__Variables__c,
-                   OneXtel__Error__c,
-                   OneXtel__Media_Type__c,
-                   OneXtel__Mime_Type__c,
-                   OneXtel__Json__c,
-                   CreatedDate,
-                   Owner.Name
-            FROM   OneXtel__WhatsApp_DLR__c
-            WHERE  OneXtel__From_Number__c   LIKE :likePattern
-            OR     OneXtel__Contact_Phone__c LIKE :likePattern
-            ORDER  BY CreatedDate ASC
-            LIMIT  1000
-        ];
-
-        return buildWrappers(allMessages, uc);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // getLeadInfo
-    // ─────────────────────────────────────────────────────────────────────
-    /**
-     * @description Returns Lead Opportunity info for the chat header.
-     * @param leadOpportunityId The Id of the Lead Opportunity record.
-     * @return WALeadInfo wrapper.
-     */
-    @AuraEnabled(cacheable=true)
-    public static WALeadInfo getLeadInfo(Id leadOpportunityId) {
-        List<Lead_Opportunity__c> loList = [
-            SELECT Id, Name, OwnerId, Owner.Name, 
-                   Phone__c, Lead_Vendor_source1__c
-            FROM   Lead_Opportunity__c
-            WHERE  Id = :leadOpportunityId
-            LIMIT  1
-        ];
-
-        if (loList.isEmpty()) {
-            throw new AuraHandledException(
-                'Lead Opportunity not found.'
-            );
-        }
-
-        Lead_Opportunity__c lo = loList[0];
-        WALeadInfo info        = new WALeadInfo();
-        info.id                = lo.Id;
-        info.name              = lo.Name;
-        info.ownerName         = lo.Owner.Name;
-        info.phone             = lo.Phone__c;
-        info.university        = lo.Lead_Vendor_source1__c;
-        info.isCurrentUserOwner = (lo.OwnerId == UserInfo.getUserId());
-        return info;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // getProviders
-    // ─────────────────────────────────────────────────────────────────────
-    /**
-     * @description Returns available WhatsApp providers.
-     * Partner users can see these via sharing rules.
-     * @return List of WAProviderOption wrappers.
-     */
-    @AuraEnabled(cacheable=true)
-    public static List<WAProviderOption> getProviders() {
-        List<WAProviderOption> options = new List<WAProviderOption>();
-        for (OneXtel__WhatsApp_Provider__c p : [
-            SELECT Id, Name
-            FROM   OneXtel__WhatsApp_Provider__c
-            ORDER  BY Name ASC
-            LIMIT  50
-        ]) {
-            WAProviderOption opt = new WAProviderOption();
-            opt.id    = p.Id;
-            opt.label = p.Name;
-            opt.value = p.Id;
-            options.add(opt);
-        }
-        return options;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // getTemplates
-    // ─────────────────────────────────────────────────────────────────────
-    /**
-     * @description Returns WhatsApp templates matching search term.
-     * Partner users can see these via sharing rules.
-     * @param searchTerm Optional filter string.
-     * @return List of WATemplateOption wrappers.
-     */
-    @AuraEnabled(cacheable=true)
-    public static List<WATemplateOption> getTemplates(String searchTerm) {
-        List<WATemplateOption> options = new List<WATemplateOption>();
-        String likeClause = String.isBlank(searchTerm)
-            ? '%'
-            : '%' + String.escapeSingleQuotes(searchTerm.trim()) + '%';
-
-        for (OneXtel__WhatsApp_Template__c t : [
-            SELECT Id, Name
-            FROM   OneXtel__WhatsApp_Template__c
-            WHERE  Name LIKE :likeClause
-            ORDER  BY Name ASC
-            LIMIT  50
-        ]) {
-            WATemplateOption opt = new WATemplateOption();
-            opt.id    = t.Id;
-            opt.label = t.Name;
-            opt.value = t.Id;
-            options.add(opt);
-        }
-        return options;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // sendTemplate
-    // ─────────────────────────────────────────────────────────────────────
-    /**
-     * @description Sends a WhatsApp template message.
-     * Called from @AuraEnabled context — OneXtel validates this.
-     * Partner sharing rules ensure provider/template records are visible.
-     * @param recordId    Lead Opportunity Id.
-     * @param templateId  OneXtel template record Id.
-     * @param phone       Destination phone number.
-     * @param providerId  OneXtel provider record Id.
-     * @return WASendResult with success flag and message.
-     */
-    @AuraEnabled
-    public static WASendResult sendTemplate(
-        Id recordId, Id templateId, String phone, Id providerId
+    private static Lead_Opportunity__c createLead(
+        String name, String phone, String university
     ) {
-        WASendResult result = new WASendResult();
+ 
+        Lead_Opportunity__c lo = new Lead_Opportunity__c(
+            Name                   = name,
+            Phone__c               = phone,
+            Lead_Vendor_source1__c = university,
+            OwnerId                = UserInfo.getUserId()
+        );
+        insert lo;
+        return lo;
+    }
+ 
+    // ─────────────────────────────────────────────────────────────────────
+    // getLeadInfo Tests
+    // ─────────────────────────────────────────────────────────────────────
+    @isTest
+    static void testGetLeadInfo_ValidRecord() {
+        Lead_Opportunity__c lead = createLead(
+            'Test Lead', '9876543210', 'Symbiosis'
+        );
+ 
+        Test.startTest();
+        WACommunityController.WALeadInfo info =
+            WACommunityController.getLeadInfo(lead.Id);
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, info,               'Info should not be null');
+        System.assertEquals(lead.Id,    (Id) info.id,   'Id should match');
+        System.assertEquals('9876543210', info.phone,   'Phone should match');
+        System.assertEquals('Symbiosis',  info.university, 'University should match');
+        System.assertEquals(true, info.isCurrentUserOwner, 'Should be owner');
+    }
+ 
+    @isTest
+    static void testGetLeadInfo_NMIMSRecord() {
+        Lead_Opportunity__c lead = createLead(
+            'Test NMIMS Lead', '9876543211', 'NMIMS'
+        );
+ 
+        Test.startTest();
+        WACommunityController.WALeadInfo info =
+            WACommunityController.getLeadInfo(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals('NMIMS', info.university, 'University should be NMIMS');
+    }
+ 
+    @isTest
+    static void testGetLeadInfo_BlankUniversity() {
+        Lead_Opportunity__c lead = createLead(
+            'Test Blank Uni', '9876543212', null
+        );
+ 
+        Test.startTest();
+        WACommunityController.WALeadInfo info =
+            WACommunityController.getLeadInfo(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(null, info.university, 'University should be null');
+    }
+ 
+    @isTest
+    static void testGetLeadInfo_NotFound_ThrowsException() {
+        Lead_Opportunity__c lead = createLead(
+            'Temp Lead', '9876543213', 'Symbiosis'
+        );
+        Id deletedId = lead.Id;
+        delete lead;
+ 
+        Boolean caught = false;
+        Test.startTest();
         try {
-            OneXtel.CustomResponse resp =
-                OneXtel.WhatsAppService.sendMessage(
-                    recordId, templateId, 'Phone__c', phone
-                );
-            result.success = evaluateResponse(resp);
-            result.message = resp != null ? resp.message : 'No response.';
-        } catch (Exception ex) {
-            result.success = false;
-            result.message = ex.getMessage();
+            WACommunityController.getLeadInfo(deletedId);
+        } catch (AuraHandledException e) {
+            caught = true;
         }
-        return result;
+        Test.stopTest();
+ 
+        System.assert(caught, 'AuraHandledException expected');
     }
-
+ 
     // ─────────────────────────────────────────────────────────────────────
-    // sendFreeform
+    // getChatHistory Tests
     // ─────────────────────────────────────────────────────────────────────
-    /**
-     * @description Sends a freeform WhatsApp message.
-     * Called from @AuraEnabled context — OneXtel validates this.
-     * @param recordId    Lead Opportunity Id.
-     * @param phone       Destination phone number.
-     * @param messageBody Text body.
-     * @param mediaType   Media type or null.
-     * @param mediaUrl    Media URL or null.
-     * @param fileName    File name or null.
-     * @param objectName  Salesforce object API name.
-     * @param providerId  OneXtel provider record Id.
-     * @return WASendResult with success flag and message.
-     */
-    @AuraEnabled
-    public static WASendResult sendFreeform(
-        Id     recordId,
-        String phone,
-        String messageBody,
-        String mediaType,
-        String mediaUrl,
-        String fileName,
-        String objectName,
-        Id     providerId
-    ) {
-        WASendResult result = new WASendResult();
+    @isTest
+    static void testGetChatHistory_NoPhone_ReturnsEmpty() {
+        Lead_Opportunity__c lead = createLead(
+            'Test No Phone', null, 'Symbiosis'
+        );
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, msgs, 'Should return empty list');
+        System.assertEquals(0, msgs.size(), 'Should be empty');
+    }
+ 
+    @isTest
+    static void testGetChatHistory_WithPhone() {
+        Lead_Opportunity__c lead = createLead(
+            'Test With Phone', '9876543210', 'Symbiosis'
+        );
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, msgs, 'Messages should not be null');
+    }
+ 
+    @isTest
+    static void testGetChatHistory_NMIMSLead() {
+        Lead_Opportunity__c lead = createLead(
+            'Test NMIMS Chat', '9876543211', 'NMIMS'
+        );
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, msgs, 'Messages should not be null');
+    }
+ 
+    @isTest
+    static void testGetChatHistory_OtherUniversity() {
+        Lead_Opportunity__c lead = createLead(
+            'Test Other Uni', '9876543212', 'Manipal'
+        );
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, msgs, 'Messages should not be null');
+    }
+ 
+    @isTest
+    static void testGetChatHistory_NotFound_ThrowsException() {
+        Lead_Opportunity__c lead = createLead(
+            'Temp Chat Lead', '9876543213', 'Symbiosis'
+        );
+        Id deletedId = lead.Id;
+        delete lead;
+ 
+        Boolean caught = false;
+        Test.startTest();
         try {
-            OneXtel.CustomResponse resp =
-                OneXtel.WhatsAppService.sendFreeformMessage(
-                    objectName, recordId, providerId,
-                    phone, messageBody, mediaType, mediaUrl, fileName
-                );
-            result.success = evaluateResponse(resp);
-            result.message = resp != null ? resp.message : 'No response.';
-        } catch (Exception ex) {
-            result.success = false;
-            result.message = ex.getMessage();
+            WACommunityController.getChatHistory(deletedId);
+        } catch (AuraHandledException e) {
+            caught = true;
         }
-        return result;
+        Test.stopTest();
+ 
+        System.assert(caught, 'AuraHandledException expected');
     }
-
+ 
     // ─────────────────────────────────────────────────────────────────────
-    // PRIVATE HELPERS
+    // getProviders Tests
     // ─────────────────────────────────────────────────────────────────────
-    private static Boolean evaluateResponse(OneXtel.CustomResponse resp) {
-        if (resp == null || resp.message == null) return false;
-        String msg = resp.message.toLowerCase();
-        return !msg.contains('fail') && !msg.contains('error');
+    @isTest
+    static void testGetProviders_ReturnsList() {
+        Test.startTest();
+        List<WACommunityController.WAProviderOption> providers =
+            WACommunityController.getProviders();
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, providers, 'Providers should not be null');
     }
-
-    private static String buildPhoneLikePattern(String phone) {
-        String digits = phone.replaceAll('[^0-9]', '');
-        String last10 = digits.length() >= 10
-                        ? digits.substring(digits.length() - 10) : digits;
-        return '%' + last10;
-    }
-
-    private static UniversityContext buildUniversityContext(
-        Lead_Opportunity__c lo
-    ) {
-        UniversityContext uc = new UniversityContext();
-        uc.university   = String.isBlank(lo.Lead_Vendor_source1__c)
-                          ? '' : lo.Lead_Vendor_source1__c.trim();
-        uc.isPreNov2025 = lo.CreatedDate.date() < PRE_NOV_2025_CUTOFF;
-        uc.isNMIMS      = uc.university.equalsIgnoreCase(NMIMS_KEY);
-        uc.isSymbiosis  = uc.university.equalsIgnoreCase(SYMBIOSIS_KEY);
-        return uc;
-    }
-
-    private static Boolean shouldInclude(
-        String providerName, UniversityContext uc
-    ) {
-        String pLower = providerName.toLowerCase();
-        if (uc.isPreNov2025) {
-            return !String.isBlank(uc.university)
-                   && pLower.contains(uc.university.toLowerCase());
-        }
-        if (uc.isNMIMS)     return pLower.contains(NMIMS_KEY.toLowerCase());
-        if (uc.isSymbiosis) return pLower.contains(SYMBIOSIS_KEY.toLowerCase());
-        return !pLower.contains(NMIMS_KEY.toLowerCase())
-            && !pLower.contains(SYMBIOSIS_KEY.toLowerCase());
-    }
-
-    private static List<WAMessageWrapper> buildWrappers(
-        List<OneXtel__WhatsApp_DLR__c> records, UniversityContext uc
-    ) {
-        List<WAMessageWrapper> result = new List<WAMessageWrapper>();
-        for (OneXtel__WhatsApp_DLR__c msg : records) {
-            String providerName = (msg.OneXtel__Provider__r != null
-                && msg.OneXtel__Provider__r.Name != null)
-                ? msg.OneXtel__Provider__r.Name : '';
-
-            if (!shouldInclude(providerName, uc)) continue;
-
-            String templateName = msg.OneXtel__Template__r != null
-                ? msg.OneXtel__Template__r.Name : null;
-
-            WAMessageWrapper w  = new WAMessageWrapper();
-            w.id                = msg.Id;
-            w.status            = msg.OneXtel__Status__c;
-            w.content           = extractContent(msg, templateName);
-            w.fromNumber        = msg.OneXtel__From_Number__c;
-            w.toNumber          = msg.OneXtel__Contact_Phone__c;
-            w.userName          = msg.OneXtel__User_Name__c;
-            w.providerName      = providerName;
-            w.templateName      = templateName;
-            w.error             = msg.OneXtel__Error__c;
-            w.mediaType         = msg.OneXtel__Media_Type__c;
-            w.createdDate       = msg.CreatedDate;
-            w.ownerName         = msg.Owner.Name;
-            w.isInbound         = msg.OneXtel__Status__c != null
-                && msg.OneXtel__Status__c.toLowerCase() == 'inbound';
-            result.add(w);
-        }
-        return result;
-    }
-
-    private static String extractContent(
-        OneXtel__WhatsApp_DLR__c msg, String templateName
-    ) {
-        if (!String.isBlank(msg.OneXtel__Message_Content__c)) {
-            return msg.OneXtel__Message_Content__c;
-        }
-        if (!String.isBlank(msg.OneXtel__Json__c)) {
-            try {
-                Map<String, Object> m =
-                    (Map<String, Object>) JSON.deserializeUntyped(
-                        msg.OneXtel__Json__c);
-                if (m.containsKey('text') && m.get('text') != null) {
-                    String txt = String.valueOf(m.get('text')).trim();
-                    if (!String.isBlank(txt)) return txt;
-                }
-            } catch (Exception e) { }
-        }
-        if (!String.isBlank(msg.OneXtel__Variables__c)) {
-            try {
-                Map<String, Object> m =
-                    (Map<String, Object>) JSON.deserializeUntyped(
-                        msg.OneXtel__Variables__c);
-                if (m.containsKey('bodyText') && m.get('bodyText') != null) {
-                    String bt = String.valueOf(m.get('bodyText')).trim();
-                    if (!String.isBlank(bt)) return bt;
-                }
-            } catch (Exception e) { }
-        }
-        if (!String.isBlank(templateName)) {
-            return '📋 Template: ' + templateName;
-        }
-        return NO_CONTENT_LABEL;
-    }
-
+ 
     // ─────────────────────────────────────────────────────────────────────
-    // INNER CLASSES
+    // getTemplates Tests
     // ─────────────────────────────────────────────────────────────────────
-    private class UniversityContext {
-        String  university;
-        Boolean isPreNov2025;
-        Boolean isNMIMS;
-        Boolean isSymbiosis;
+    @isTest
+    static void testGetTemplates_BlankSearch() {
+        Test.startTest();
+        List<WACommunityController.WATemplateOption> templates =
+            WACommunityController.getTemplates('');
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, templates, 'Templates should not be null');
     }
-
-    public class WAMessageWrapper {
-        @AuraEnabled public String   id;
-        @AuraEnabled public String   status;
-        @AuraEnabled public String   content;
-        @AuraEnabled public String   fromNumber;
-        @AuraEnabled public String   toNumber;
-        @AuraEnabled public String   userName;
-        @AuraEnabled public String   providerName;
-        @AuraEnabled public String   templateName;
-        @AuraEnabled public String   error;
-        @AuraEnabled public String   mediaType;
-        @AuraEnabled public DateTime createdDate;
-        @AuraEnabled public String   ownerName;
-        @AuraEnabled public Boolean  isInbound;
+ 
+    @isTest
+    static void testGetTemplates_NullSearch() {
+        Test.startTest();
+        List<WACommunityController.WATemplateOption> templates =
+            WACommunityController.getTemplates(null);
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, templates, 'Templates should not be null');
     }
-
-    public class WALeadInfo {
-        @AuraEnabled public String  id;
-        @AuraEnabled public String  name;
-        @AuraEnabled public String  ownerName;
-        @AuraEnabled public String  phone;
-        @AuraEnabled public String  university;
-        @AuraEnabled public Boolean isCurrentUserOwner;
+ 
+    @isTest
+    static void testGetTemplates_WithSearchTerm() {
+        Test.startTest();
+        List<WACommunityController.WATemplateOption> templates =
+            WACommunityController.getTemplates('welcome');
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, templates, 'Templates should not be null');
     }
-
-    public class WAProviderOption {
-        @AuraEnabled public String id;
-        @AuraEnabled public String label;
-        @AuraEnabled public String value;
+ 
+    // ─────────────────────────────────────────────────────────────────────
+    // sendTemplate Tests
+    // ─────────────────────────────────────────────────────────────────────
+    @isTest
+    static void testSendTemplate_HandlesException() {
+        Lead_Opportunity__c lead = createLead(
+            'Test Send Template', '9876543210', 'Symbiosis'
+        );
+ 
+        Test.startTest();
+        WACommunityController.WASendResult result =
+            WACommunityController.sendTemplate(
+                lead.Id,
+                lead.Id, // fake template Id
+                '9876543210',
+                lead.Id  // fake provider Id
+            );
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, result,         'Result should not be null');
+        System.assertNotEquals(null, result.message, 'Message should not be null');
+        System.assertEquals(false, result.success,   'Should fail with fake Ids');
     }
-
-    public class WATemplateOption {
-        @AuraEnabled public String id;
-        @AuraEnabled public String label;
-        @AuraEnabled public String value;
+ 
+    // ─────────────────────────────────────────────────────────────────────
+    // sendFreeform Tests
+    // ─────────────────────────────────────────────────────────────────────
+    @isTest
+    static void testSendFreeform_TextMessage() {
+        Lead_Opportunity__c lead = createLead(
+            'Test Freeform', '9876543210', 'Symbiosis'
+        );
+ 
+        Test.startTest();
+        WACommunityController.WASendResult result =
+            WACommunityController.sendFreeform(
+                lead.Id,
+                '9876543210',
+                'Hello test message',
+                null, null, null,
+                'Lead_Opportunity__c',
+                lead.Id
+            );
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, result,         'Result should not be null');
+        System.assertNotEquals(null, result.message, 'Message should not be null');
+        System.assertEquals(false, result.success,   'Should fail with fake Ids');
     }
-
-    public class WASendResult {
-        @AuraEnabled public Boolean success;
-        @AuraEnabled public String  message;
+ 
+    @isTest
+    static void testSendFreeform_MediaMessage() {
+        Lead_Opportunity__c lead = createLead(
+            'Test Media', '9876543210', 'NMIMS'
+        );
+ 
+        Test.startTest();
+        WACommunityController.WASendResult result =
+            WACommunityController.sendFreeform(
+                lead.Id,
+                '9876543210',
+                null,
+                'Image',
+                'https://example.com/img.jpg',
+                'img.jpg',
+                'Lead_Opportunity__c',
+                lead.Id
+            );
+        Test.stopTest();
+ 
+        System.assertNotEquals(null, result, 'Result should not be null');
+        System.assertEquals(false, result.success, 'Should fail with fake Ids');
+    }
+ 
+    // ─────────────────────────────────────────────────────────────────────
+    // Wrapper Class Coverage
+    // ─────────────────────────────────────────────────────────────────────
+    @isTest
+    static void testAllWrapperClasses() {
+        WACommunityController.WAMessageWrapper w =
+            new WACommunityController.WAMessageWrapper();
+        w.id           = 'testId';
+        w.status       = 'inbound';
+        w.content      = 'Hello';
+        w.fromNumber   = '919876543210';
+        w.toNumber     = '911234567890';
+        w.userName     = 'TestUser';
+        w.providerName = 'Symbiosis Provider';
+        w.templateName = 'WelcomeTemplate';
+        w.error        = null;
+        w.mediaType    = 'Image';
+        w.createdDate  = DateTime.now();
+        w.ownerName    = 'Owner';
+        w.isInbound    = true;
+        System.assertEquals('inbound', w.status);
+        System.assertEquals(true, w.isInbound);
+ 
+        WACommunityController.WALeadInfo info =
+            new WACommunityController.WALeadInfo();
+        info.id                 = 'testId';
+        info.name               = 'Test Lead';
+        info.ownerName          = 'Owner';
+        info.phone              = '9876543210';
+        info.university         = 'Symbiosis';
+        info.isCurrentUserOwner = true;
+        System.assertEquals('Symbiosis', info.university);
+ 
+        WACommunityController.WAProviderOption pOpt =
+            new WACommunityController.WAProviderOption();
+        pOpt.id    = 'pId';
+        pOpt.label = 'Symbiosis Provider';
+        pOpt.value = 'pId';
+        System.assertEquals('Symbiosis Provider', pOpt.label);
+ 
+        WACommunityController.WATemplateOption tOpt =
+            new WACommunityController.WATemplateOption();
+        tOpt.id    = 'tId';
+        tOpt.label = 'Welcome Template';
+        tOpt.value = 'tId';
+        System.assertEquals('Welcome Template', tOpt.label);
+ 
+        WACommunityController.WASendResult sr =
+            new WACommunityController.WASendResult();
+        sr.success = false;
+        sr.message = 'No response from service.';
+        System.assertEquals(false, sr.success);
+        System.assert(sr.message.contains('No response'));
+    }
+ 
+        // ─────────────────────────────────────────────────────────────────────
+    // getChatHistory Coverage Tests (content branches + shouldInclude branches)
+    // ─────────────────────────────────────────────────────────────────────
+        private static OneXtel__WhatsApp_Provider__c createProvider(String name) {
+        OneXtel__WhatsApp_Provider__c p = new OneXtel__WhatsApp_Provider__c(
+            Name                       = name,
+            OneXtel__API_key__c        = 'test-api-key-12345',
+            OneXtel__Sender_Id__c      = 'TESTSENDER',
+            OneXtel__Waba_Id__c        = '1234567890'
+        );
+        insert p;
+        return p;
+    }
+ 
+        private static OneXtel__WhatsApp_Template__c createTemplate(String name, Id providerId) {
+        OneXtel__WhatsApp_Template__c t = new OneXtel__WhatsApp_Template__c(
+            Name                          = name,
+            OneXtel__Template_Id__c       = 'tmpl_test_' + String.valueOf(Crypto.getRandomInteger()).right(6),
+            OneXtel__WhatsApp_Provider__c = providerId
+        );
+        insert t;
+        return t;
+    }
+ 
+    private static OneXtel__WhatsApp_DLR__c createDLR(
+        String phone, Id providerId, Id templateId,
+        String status, String content, String jsonVal, String variablesVal
+    ) {
+        OneXtel__WhatsApp_DLR__c dlr = new OneXtel__WhatsApp_DLR__c(
+            OneXtel__Status__c          = status,
+            OneXtel__From_Number__c     = phone,
+            OneXtel__Contact_Phone__c   = phone,
+            OneXtel__User_Name__c       = 'Test User',
+            OneXtel__Provider__c        = providerId,
+            OneXtel__Template__c        = templateId,
+            OneXtel__Message_Content__c = content,
+            OneXtel__Json__c            = jsonVal,
+            OneXtel__Variables__c       = variablesVal
+        );
+        insert dlr;
+        return dlr;
+    }
+ 
+    @isTest
+    static void testGetChatHistory_SymbiosisProvider_DirectContent() {
+        OneXtel__WhatsApp_Provider__c prov = createProvider('Symbiosis Official');
+        Lead_Opportunity__c lead = createLead('Sym Lead', '9998887770', 'Symbiosis');
+        createDLR('9998887770', prov.Id, null, 'inbound', 'Hello direct content', null, null);
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(1, msgs.size(), 'Should return matching Symbiosis message');
+        System.assertEquals('Hello direct content', msgs[0].content);
+    }
+ 
+    @isTest
+    static void testGetChatHistory_NMIMSProvider_JsonContent() {
+        OneXtel__WhatsApp_Provider__c prov = createProvider('NMIMS Deemed University');
+        Lead_Opportunity__c lead = createLead('NMIMS Lead', '9998887771', 'NMIMS');
+        createDLR('9998887771', prov.Id, null, 'outbound', null, '{"text":"Json body text"}', null);
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(1, msgs.size(), 'Should return matching NMIMS message');
+        System.assertEquals('Json body text', msgs[0].content);
+    }
+ 
+    @isTest
+    static void testGetChatHistory_OtherProvider_VariablesContent() {
+        OneXtel__WhatsApp_Provider__c prov = createProvider('Manipal Provider');
+        Lead_Opportunity__c lead = createLead('Other Uni Lead', '9998887772', 'Manipal');
+        createDLR('9998887772', prov.Id, null, 'outbound', null, null, '{"bodyText":"Variables body text"}');
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(1, msgs.size(), 'Should return matching Other-university message');
+        System.assertEquals('Variables body text', msgs[0].content);
+    }
+ 
+    @isTest
+    static void testGetChatHistory_TemplateFallback_NoDirectContent() {
+        OneXtel__WhatsApp_Provider__c prov = createProvider('Symbiosis Institute');
+        OneXtel__WhatsApp_Template__c tmpl = createTemplate('Welcome Template', prov.Id);
+        Lead_Opportunity__c lead = createLead('Template Lead', '9998887773', 'Symbiosis');
+        createDLR('9998887773', prov.Id, tmpl.Id, 'outbound', null, null, null);
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(1, msgs.size(), 'Should return one message');
+        System.assert(msgs[0].content.contains('Welcome Template'), 'Should fall back to template label');
+    }
+ 
+    @isTest
+    static void testGetChatHistory_NoContentLabel() {
+        OneXtel__WhatsApp_Provider__c prov = createProvider('Symbiosis International');
+        Lead_Opportunity__c lead = createLead('No Content Lead', '9998887774', 'Symbiosis');
+        createDLR('9998887774', prov.Id, null, 'outbound', null, null, null);
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(1, msgs.size(), 'Should return one message');
+        System.assertEquals('(No content)', msgs[0].content);
+    }
+ 
+    @isTest
+    static void testGetChatHistory_PreNov2025_UniversityMatch() {
+        OneXtel__WhatsApp_Provider__c prov = createProvider('Manipal Legacy Provider');
+        Lead_Opportunity__c lead = createLead('Pre Nov Lead', '9998887775', 'Manipal');
+        // Push CreatedDate before the Nov-2025 cutoff to hit the isPreNov2025 branch
+        Test.setCreatedDate(lead.Id, DateTime.newInstance(2025, 6, 1, 10, 0, 0));
+        createDLR('9998887775', prov.Id, null, 'outbound', 'Pre-Nov message', null, null);
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(1, msgs.size(), 'Pre-Nov-2025 university match should include message');
+    }
+ 
+    @isTest
+    static void testGetChatHistory_MismatchedProvider_Excluded() {
+        OneXtel__WhatsApp_Provider__c prov = createProvider('NMIMS Official');
+        Lead_Opportunity__c lead = createLead('Mismatch Lead', '9998887776', 'Symbiosis');
+        createDLR('9998887776', prov.Id, null, 'outbound', 'Should be excluded', null, null);
+ 
+        Test.startTest();
+        List<WACommunityController.WAMessageWrapper> msgs =
+            WACommunityController.getChatHistory(lead.Id);
+        Test.stopTest();
+ 
+        System.assertEquals(0, msgs.size(), 'NMIMS provider should be excluded for a Symbiosis lead');
     }
 }
+ 
